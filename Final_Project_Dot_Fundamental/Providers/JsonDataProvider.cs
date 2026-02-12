@@ -1,10 +1,11 @@
-﻿using System;
+﻿using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Logging;
 
 namespace Final_Project_Dot_Fundamental.Providers
 {
@@ -17,7 +18,7 @@ namespace Final_Project_Dot_Fundamental.Providers
             _logger = logger;
         }
 
-        public async Task<IEnumerable<T>> ReadAsync(string path)
+        public async Task<IEnumerable<T>> ReadAsync(string path, CancellationToken cancellationToken)
         {
             try
             {
@@ -27,13 +28,26 @@ namespace Final_Project_Dot_Fundamental.Providers
                     throw new FileNotFoundException($"JSON file not found: {path}");
                 }
 
-                await using var stream = File.OpenRead(path);
-                var options = new JsonSerializerOptions
+                var settings = new JsonSerializerSettings
                 {
-                    PropertyNameCaseInsensitive = true
+                    MissingMemberHandling = MissingMemberHandling.Ignore,
+                    Error = (sender, args) =>
+                    {
+                        _logger.LogError(
+                            "Bug at {Member} - Error: {Message}",
+                            args.ErrorContext.Member,
+                            args.ErrorContext.Error.Message
+                        );
+                        args.ErrorContext.Handled = true; 
+                    }
                 };
 
-                var data = await JsonSerializer.DeserializeAsync<List<T>>(stream, options);
+                using var reader = new StreamReader(path);
+                var json = await reader.ReadToEndAsync();
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var data = JsonConvert.DeserializeObject<List<T>>(json, settings);
 
                 if (data == null)
                 {
@@ -41,11 +55,17 @@ namespace Final_Project_Dot_Fundamental.Providers
                     return Enumerable.Empty<T>();
                 }
 
+                _logger.LogInformation("Read {Count} records from JSON file", data.Count);
                 return data;
             }
             catch (JsonException ex)
             {
                 _logger.LogError(ex, "Failed to deserialize JSON file");
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Reading JSON file was cancelled");
                 throw;
             }
             catch (Exception ex)

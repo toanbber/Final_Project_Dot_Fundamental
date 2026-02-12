@@ -1,9 +1,11 @@
 ﻿using Final_Project_Dot_Fundamental.Model;
 using Final_Project_Dot_Fundamental.Processor;
 using Final_Project_Dot_Fundamental.Providers;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Serilog;
+using System.Diagnostics;
 
 namespace Final_Project_Dot_Fundamental
 {
@@ -11,67 +13,99 @@ namespace Final_Project_Dot_Fundamental
     {
         static async Task Main(string[] args)
         {
-
-
             var config = new ConfigurationBuilder()
                 .SetBasePath(Directory.GetCurrentDirectory())
                 .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
                 .Build();
 
+            Log.Logger = new LoggerConfiguration()
+                .WriteTo.Console()
+                .WriteTo.File("log.txt",
+                    rollingInterval: RollingInterval.Day,
+                    rollOnFileSizeLimit: true)
+                .CreateLogger();
+
             var services = new ServiceCollection();
-            services.AddLogging(builder =>
-            {
-                builder.ClearProviders();
-                builder.AddConsole();
-                builder.SetMinimumLevel(LogLevel.Information);
-            });
+            services.AddLogging(builder => builder.AddSerilog(dispose: true));
+            services.AddHttpClient();
 
-            string jsonPath = config["DataSources:Titanic:JsonPath"];
-            string csvPath = config["DataSources:Titanic:CsvPath"];
-            string apiUrl = config["DataSources:Api:TodoUrl"];
+            string jsonPath = config["DataSources:Todo:BadJsonPath"];
+            string csvPath = config["DataSources:Todo:BadCsvPath"];
+            string apiUrl = config["DataSources:Todo:ApiPath"];
 
-            services.AddTransient<IDataProvider<Titanic>, JsonDataProvider<Titanic>>();
-            services.AddTransient<IDataProvider<Titanic>, CsvDataProvider<Titanic>>();
-            services.AddTransient<IDataProvider<Todo>, ApiDataProvider<Todo>>();
-            services.AddTransient<TitanicDataProcessor>();
+            services.AddTransient<JsonDataProvider<Todo>>();
+            services.AddTransient<CsvDataProvider<Todo>>();
+            services.AddTransient<ApiDataProvider<Todo>>();
             services.AddTransient<TodoProcessor>();
 
             var serviceProvider = services.BuildServiceProvider();
             var logger = serviceProvider.GetRequiredService<ILogger<Program>>();
 
             logger.LogInformation("Application starting");
+            var stopwatch = new Stopwatch();
+            var startTime = DateTime.Now;
+            stopwatch.Start();
 
+            logger.LogInformation("Start time: {StartTime}", startTime);
             try
             {
-                var titanicProcessor = serviceProvider.GetRequiredService<TitanicDataProcessor>();
                 var todoProcessor = serviceProvider.GetRequiredService<TodoProcessor>();
-                var titanicProviders = serviceProvider.GetServices<IDataProvider<Titanic>>();
-                var todoProvider = serviceProvider.GetRequiredService<IDataProvider<Todo>>();
 
-                foreach (var provider in titanicProviders)
+                var jsonProvider = serviceProvider.GetRequiredService<JsonDataProvider<Todo>>();
+                var csvProvider = serviceProvider.GetRequiredService<CsvDataProvider<Todo>>();
+                var apiProvider = serviceProvider.GetRequiredService<ApiDataProvider<Todo>>();
+
+                CancellationTokenSource cts = new CancellationTokenSource();
+                Console.CancelKeyPress += (sender, e) =>
                 {
-                    string path = provider is JsonDataProvider<Titanic> ? jsonPath : csvPath;
-                    logger.LogInformation("Start reading Titanic data");
-                    var passengers = await provider.ReadAsync(path);
-                    logger.LogInformation("Finished reading Titanic data");
-                    logger.LogInformation("Start processing Titanic data");
-                    titanicProcessor.ProcessData(passengers);
-                    logger.LogInformation("Finished processing Titanic data");
-                }
+                    e.Cancel = true; 
+                    cts.Cancel();
+                };
 
-             
-                logger.LogInformation("Start reading Todo data");
-                var todos = await todoProvider.ReadAsync(apiUrl);
-                logger.LogInformation("Finished reading Todo data");
-                logger.LogInformation("Start processing Todo data");
-                todoProcessor.ProcessData(todos);
-                logger.LogInformation("Finished processing Todo data");
-                logger.LogInformation("=== Application finished successfully ===");
+                logger.LogInformation("Start reading from json");
+                var jsonTodos = await jsonProvider.ReadAsync(jsonPath, cts.Token);
+                 todoProcessor.ProcessData(jsonTodos);
+                logger.LogInformation("Finished reading from json");
+
+                logger.LogInformation("Start reading from CSV");
+                var csvTodos = await csvProvider.ReadAsync(csvPath,cts.Token);
+                todoProcessor.ProcessData(csvTodos);
+                logger.LogInformation("Finished reading from CSV");
+
+                logger.LogInformation("Start reading Todo data from API: {Url}", apiUrl);
+                var apiTodos = await apiProvider.ReadAsync(apiUrl,cts.Token);
+                todoProcessor.ProcessData(apiTodos);
+                logger.LogInformation("Finished processing API Todo data");
+
+                var allTodos = jsonTodos
+                    .Concat(csvTodos)
+                    .Concat(apiTodos)
+                    .ToList();
+
+                var outputPath = "merged_todos.csv";
+                logger.LogInformation("Exporting merged data to CSV: {Path}", outputPath);
+                todoProcessor.ExportToCsv(allTodos, outputPath);
+                stopwatch.Stop();
+                var endTime = DateTime.Now;
+
+                logger.LogInformation("End time: {EndTime}", endTime);
+                logger.LogInformation("Total execution time: {Ms}", stopwatch.ElapsedMilliseconds);
+                logger.LogInformation("Total records processed: {Count}", allTodos.Count);
+            }
+            catch (OperationCanceledException)
+            {
+                logger.LogWarning("Operation was cancelled by user.");
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "An unexpected error");
+                logger.LogError(ex, "An unexpected error occurred");
             }
+
+            finally
+            {
+                Log.CloseAndFlush();
+            }
+
             Console.ReadKey();
         }
     }
